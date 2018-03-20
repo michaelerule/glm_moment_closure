@@ -10,6 +10,7 @@ from __future__ import print_function
 
 import numpy as np
 import scipy
+from functions import sexp,slog
 
 def ensemble_sample(stim,B,beta,M=100):
     '''
@@ -211,7 +212,7 @@ def langevin_sample_expected(stim,A,beta,C,
     
     
 from scipy.special import polygamma
-def inversepolygamma(n,x,iterations=15,tol=1e-6):
+def inversepolygamma(n,x,iterations=1500,tol=1e-16):
     '''
     The Gaussian moment closure computes <λ> and <λh> under the assumption
     that λ is log-Gaussian distributed, with the moments given by the
@@ -233,20 +234,38 @@ def inversepolygamma(n,x,iterations=15,tol=1e-6):
     This idea is quite general, and the Gamma assumption didn't turn out to
     be all that more accurate in practice.
     '''
-    x = np.maximum(x,1e-9)
+    x = np.maximum(x,1e-19)
+    x = np.array(x)
+    if np.prod(x.shape)>1:
+        y = [inversepolygamma(n,xi,iterations,tol) for xi in x.ravel()]
+        y = np.array(y).reshape(x.shape)
+        return y
     y = 1/x
     i = 0
     while i<iterations:
         newy = y-(polygamma(n,y)-x)/polygamma(n+1,y)
-        if all(abs(newy-y)/abs(newy))<tol:
+        if abs(newy-y)<tol:
             break
         y = newy
         i+=1
     return y
 
-def expgammameancorrection(v):
-    a = inversepolygamma(1,v)
+def expgammameancorrection(v,tol=1e-6):
+    '''
+    Correction to mean-rate using gamma moment matching. 
+    This may be more accurate in some cases but in general has not been
+    evaluated for accuracy, it could be worse in others.
+    '''
+    a = inversepolygamma(1,v,tol=tol)
     return a/np.exp(polygamma(0,a))
+
+def robust_expgammameancorrection(v):
+    '''
+    Quadratic regression for gamma moment-matching for small variance.
+    This may be more accurate in some cases but in general has not been
+    evaluated for accuracy, it could be worse in others.
+    '''
+    return 1+0.33257734*v+0.04030693*v**2
     
 def integrate_moments(stim,A,beta,C,
     dt         = 1.0,
@@ -342,21 +361,21 @@ def integrate_moments(stim,A,beta,C,
             correction  = expgammameancorrection(logv)
             Rm = R0*correction
             return Rm,Cb*R0+Adt
-    elif method=="gamma_approximate":
+    elif method=="robust_gamma":
         def update(logx,logv,R0,M1,M2):
-            correction = (1+0.33257734*logv+0.04030693*logv**2)
+            correction  = robust_expgammameancorrection(logv)
             Rm = R0*correction
             return Rm,Cb*R0+Adt
     elif method=="moment_closure":
         def update(logx,logv,R0,M1,M2):
-            Rm = R0 * min(np.exp(0.5*logv),maxvcorr)
+            Rm = R0 * min(sexp(0.5*logv),maxvcorr)
             return Rm,Cb*Rm+Adt
     for i,s in enumerate(stim):
         for j in range(oversample):
             assert(np.all(np.isfinite(M1)) and np.all(np.isfinite(M2)))
             logv  = beta.T.dot(M2).dot(beta)
             logx  = min(beta.T.dot(M1)+s,maxlogr)
-            R0    = np.exp(logx)*dtfine
+            R0    = sexp(logx)*dtfine
             Rm,J  = update(logx,logv,R0,M1,M2)
             M2    = cov_update(M2,J) + CC*Rm
             M1    = mean_update(M1) + C*Rm
