@@ -249,23 +249,6 @@ def inversepolygamma(n,x,iterations=1500,tol=1e-16):
         y = newy
         i+=1
     return y
-
-def expgammameancorrection(v,tol=1e-6):
-    '''
-    Correction to mean-rate using gamma moment matching. 
-    This may be more accurate in some cases but in general has not been
-    evaluated for accuracy, it could be worse in others.
-    '''
-    a = inversepolygamma(1,v,tol=tol)
-    return a/np.exp(polygamma(0,a))
-
-def robust_expgammameancorrection(v):
-    '''
-    Quadratic regression for gamma moment-matching for small variance.
-    This may be more accurate in some cases but in general has not been
-    evaluated for accuracy, it could be worse in others.
-    '''
-    return 1+0.33257734*v+0.04030693*v**2
     
 def integrate_moments(stim,A,beta,C,
     dt         = 1.0,
@@ -355,16 +338,6 @@ def integrate_moments(stim,A,beta,C,
     elif method=="second_order":
         def update(logx,logv,R0,M1,M2):
             Rm = R0 * min(1+0.5*logv,maxvcorr)
-            return Rm,Cb*R0+Adt
-    elif method=="gamma_matched":
-        def update(logx,logv,R0,M1,M2):
-            correction  = expgammameancorrection(logv)
-            Rm = R0*correction
-            return Rm,Cb*R0+Adt
-    elif method=="robust_gamma":
-        def update(logx,logv,R0,M1,M2):
-            correction  = robust_expgammameancorrection(logv)
-            Rm = R0*correction
             return Rm,Cb*R0+Adt
     elif method=="moment_closure":
         def update(logx,logv,R0,M1,M2):
