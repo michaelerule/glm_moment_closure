@@ -580,7 +580,7 @@ def expand_y_range(yvalues,ax=None,precision=1,pad=1.2):
     _y2 = ceil_to_precision(y2,precision)
     ylim(min(_y1,ylim()[0]),max(_y2,ylim()[1]))
 
-def stderrplot(m,v,color='k',alpha=0.1,smooth=None,lw=1.5,filled=True,label=None,stdwidth=1.96):
+def stderrplot(m,v,color='k',alpha=0.1,smooth=None,lw=1.5,filled=True,label=None,stdwidth=1.96,**kwargs):
     '''
     Parameters
     ----------

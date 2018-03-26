@@ -250,9 +250,22 @@ def inversepolygamma(n,x,iterations=1500,tol=1e-16):
         i+=1
     return y
     
+    
+def robust_expgammameancorrection(v):
+    '''
+    Quadratic regression for gamma moment-matching for small variance.
+    This may be more accurate in some cases but in general has not been
+    evaluated for accuracy, it could be worse in others.
+    
+    This was obtained by regressing a quadratic polynomial to the 
+    exact solution for gamma moment-matching of the mean / variance for
+    predicting <λ>. This is experimental!
+    '''
+    return 1+0.33257734*v+0.04030693*v**2
+    
 def integrate_moments(stim,A,beta,C,
     dt         = 1.0,
-    oversample = 25,
+    oversample = 10,
     maxrate    = 500,
     maxvcorr   = 2000,
     method     = "moment_closure",
@@ -343,6 +356,11 @@ def integrate_moments(stim,A,beta,C,
         def update(logx,logv,R0,M1,M2):
             Rm = R0 * min(sexp(0.5*logv),maxvcorr)
             return Rm,Cb*Rm+Adt
+    elif method=="approximate_gamma":
+        def update(logx,logv,R0,M1,M2):
+            correction  = robust_expgammameancorrection(logv)
+            Rm = R0*correction
+            return Rm,Cb*R0+Adt
     for i,s in enumerate(stim):
         for j in range(oversample):
             assert(np.all(np.isfinite(M1)) and np.all(np.isfinite(M2)))
