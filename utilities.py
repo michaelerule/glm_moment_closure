@@ -11,6 +11,10 @@ from __future__ import print_function
 import numpy as np
 from scipy.signal.signaltools import fftconvolve,hilbert
 from scipy.signal import butter, filtfilt, lfilter
+from scipy.linalg import lstsq,pinv
+    
+import datetime
+import time as systime
 
 # Sample from OU
 def sample_ou_process(x0,sigma,tau,dt,N,ntrial=1):
@@ -102,6 +106,9 @@ def box_filter(data,smoothat):
     return smoothed[N//2:N//2+N]
     
 def pulse_sequence(amplitudes,durationms,offset):
+    '''
+    Generate stimulation pulse sequences
+    '''
     pulses = []
     for a in amplitudes:
         for d in durationms:
@@ -110,3 +117,125 @@ def pulse_sequence(amplitudes,durationms,offset):
             pulses.append(pulse)
     np.random.shuffle(pulses)
     return np.array(np.concatenate(pulses))
+    
+    
+def linv(M,x):
+    return lstsq(M,x)[0]
+
+def cinv(x):
+    '''
+    Inver PSD matrix using Cholesky factorization
+    '''
+    ch = chol(0.5*(x+x.T)); # x = chol(x)'*chol(x)
+    ch = linv(ch,np.eye(ch.shape[0]))
+    return ch.dot(ch.T);
+
+def trychol(M,reg_cov=1e-6):
+    try:
+        C = chol(M)
+    except LinAlgError:
+        M = repair_covariance(M,reg_cov)
+        C = chol(M)
+    return C
+
+def current_milli_time():
+    '''
+    Returns the time in milliseconds
+    '''
+    return int(round(systime.time() * 1000))
+
+now = current_milli_time
+
+def today():
+    '''
+    Returns
+    -------
+    `string` : the date in YYMMDD format
+    '''
+    return datetime.date.today().strftime('%Y%m%d')
+
+__GLOBAL_TIC_TIME__ = None
+def tic(st=''):
+    ''' 
+    Similar to Matlab tic 
+    stackoverflow.com/questions/5849800/tic-toc-functions-analog-in-python
+    
+    Parameters
+    ----------
+    
+    Returns
+    -------
+    '''
+    global __GLOBAL_TIC_TIME__
+    t = current_milli_time()
+    try:
+        __GLOBAL_TIC_TIME__
+        if not __GLOBAL_TIC_TIME__ is None:
+            print('t=%dms'%((t-__GLOBAL_TIC_TIME__)),st)
+        else: print("timing...")
+    except: print("timing...")
+    __GLOBAL_TIC_TIME__ = current_milli_time()
+    return t
+
+def toc(st=''):
+    ''' 
+    Similar to Matlab toc 
+    stackoverflow.com/questions/5849800/tic-toc-functions-analog-in-python
+    
+    Parameters
+    ----------
+    
+    Returns
+    -------
+    '''
+    global __GLOBAL_TIC_TIME__
+    t = current_milli_time()
+    try:
+        __GLOBAL_TIC_TIME__
+        if not __GLOBAL_TIC_TIME__ is None:
+            print('dt=%dms'%((t-__GLOBAL_TIC_TIME__)),st)
+        else:
+            print("havn't called tic yet?")
+    except: print("havn't called tic yet?")
+    return t
+
+# For repairing numerical issues with covariance
+from statsmodels.stats.correlation_tools import cov_nearest
+from numpy.linalg.linalg import cholesky as chol
+from numpy.linalg.linalg import LinAlgError
+
+def repair_covariance(M2,reg_cov):
+    '''
+    Suppress numeric errors by keeping
+    covariance matrix positive semidefiniteb
+    '''
+    K = M2.shape[0]
+    strength = reg_cov+max(0,-np.min(np.diag(M2)))
+    M2 = 0.5*(M2+M2.T) + strength*np.eye(K) 
+    for retry in range(20):
+        try:
+            ch = chol(M2)
+            break
+        except LinAlgError:
+            M2 += strength*np.eye(K) 
+            strength *= 2
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore')
+                    M2 = cov_nearest(M2,method="clipped")
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except:
+                # covariance repair failed!
+                try:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore')
+                        M2 = cov_nearest(M2,method="nearest")
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except:
+                    # covariance repair failed!
+                    pass
+    return M2
+    
+

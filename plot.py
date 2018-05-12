@@ -452,6 +452,18 @@ def subfigurelabel(x,subplot_label_size=14,dx=20,dy=5):
         'horizontalalignment':'right'}
     text(xlim()[0]-pixels_to_xunits(dx),ylim()[1]+pixels_to_yunits(dy),x,**fontproperties)
 
+def shortscientific(x,prec=0):
+    '''
+    Parameters
+    ----------
+    x : scalar numeric
+    prec : non-negative integer
+    
+    Returns
+    -------
+    '''
+    return ('%.*e'%(prec,x)).replace('-0','-').replace('+','').replace('e0','e')
+
 def sigbar(x1,x2,y,pvalue,dy=5,LABELSIZE=10):
     '''
     draw a significance bar between position x1 and x2 at height y 
@@ -463,6 +475,27 @@ def sigbar(x1,x2,y,pvalue,dy=5,LABELSIZE=10):
     height = y+2*dy
     plot([x1,x1,x2,x2],[height-dy,height,height,height-dy],lw=0.5,color=BLACK)
     text(np.mean([x1,x2]),height+dy,shortscientific(pvalue),fontsize=LABELSIZE,horizontalalignment='center')
+
+def v2str(p):
+    '''
+    Format vector as string in short scientific notation
+    '''
+    return '['+','.join([shortscientific(x) for x in p])+']'
+
+def v2str_long(p):
+    '''
+    Format vector as string with maximum precision
+    '''
+    return '['+','.join([np.float128(x).astype(str) for x in p])+']'
+
+import datetime
+def today():
+    '''
+    Returns
+    -------
+    `string` : the date in YYMMDD format
+    '''
+    return datetime.date.today().strftime('%Y%m%d')
 
 def savefigure(name):
     '''
@@ -565,6 +598,9 @@ def floor_to_precision(x,precision=1):
     precision *= factor
     return np.floor(x*precision)/precision
 
+
+
+
 def expand_y_range(yvalues,ax=None,precision=1,pad=1.2):
     '''
     Round upper/lower y axis bound outwards to given precision
@@ -603,10 +639,10 @@ def stderrplot(m,v,color='k',alpha=0.1,smooth=None,lw=1.5,filled=True,label=None
         m = neurotools.signal.signal.box_filter(m,smooth)
     if filled:
         c = matplotlib.colors.colorConverter.to_rgb(color)+(alpha ,)
-        fill_between(np.arange(len(m)),m-e,m+e,lw=0,color=c)
+        fill_between(np.arange(len(m)),m-e,m+e,lw=0,color=c,**kwargs)
     else:
-        plot(m-e,':',lw=lw*0.5,color=color)
-        plot(m+e,':',lw=lw*0.5,color=color)    
+        plot(m-e,':',lw=lw*0.5,color=color,**kwargs)
+        plot(m+e,':',lw=lw*0.5,color=color,**kwargs)    
 
 def yscalebar(ycenter,yheight,label,x=None,color='k',fontsize=9,ax=None):
     '''

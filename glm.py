@@ -312,6 +312,37 @@ def make_cosine_basis(N,L,min_interval,normalize=True):
     B = log_cosine_basis(np.arange(N),t,base=b,offset=0,normalize=normalize)
     return B
     
+# Argument cleaning: tolerate some sloppiness in return types
+from neurotools.linalg.arguments import scalar,asvector
+
+def numeric_grad(obj,p,delta=np.finfo('float32').eps**0.1):
+    '''
+    Numerically estimate the gradient of an objective function
+    '''
+    N = len(p)
+    g = np.zeros(N)
+    x = scalar(obj(p))
+    for i in range(N):
+        dp     = p.copy()
+        dp[i] += delta
+        dx     = scalar(obj(dp))
+        g[i]   = (dx-x)/delta
+    return g
+
+def numeric_hess(jac,p,delta=np.finfo('float32').eps**0.1):
+    '''
+    Numerically estimate the hessian given a gradient function
+    '''
+    N = len(p)
+    H = np.zeros(N,N)
+    g = asvector(jac(p))
+    for i in range(N):
+        for j in range(N):
+            dp     = p.copy()
+            dp[i] += delta
+            dx     = asvector(jac(dp))
+            H[i]   = (dx-x)/delta
+    return H
 
 #############################################################################
 
