@@ -4,4 +4,5 @@ Demonstration of moment closure applied to autoregressive generaliezd linear poi
 This repository demonstrates the application of moment closure to 
 autoregressive point-process generalized linear models (PPGLMs).
 
-This repository is under construction.
+Please see the iPython notebook `ARPPGLM_moment_equations` for further 
+details. 

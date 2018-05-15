@@ -97,6 +97,7 @@ def box_filter(data,smoothat):
         One-dimensional filtered signal
     '''
     N = len(data)
+    data[~np.isfinite(data)]=0
     assert len(data.shape)==1
     padded = np.zeros(2*N,dtype=data.dtype)
     padded[N//2:N//2+N]=data
@@ -238,4 +239,40 @@ def repair_covariance(M2,reg_cov):
                     pass
     return M2
     
+def bandpass_filter(data,fa=None,fb=None,
+    Fs=1000.,order=4,zerophase=True,bandstop=False):
+    '''
+    IF fa is None, assumes lowpass with cutoff fb
+    IF fb is None, assume highpass with cutoff fa
+    Array can be any dimension, filtering performed over last dimension
 
+    Parameters
+    ----------
+        data (ndarray): data, filtering performed over last dimension
+        fa (number): low-frequency cutoff. If none, highpass at fb
+        fb (number): high-frequency cutoff. If none, lowpass at fa
+        order (1..6): butterworth filter order. Default 4
+        zerophase (boolean): Use forward-backward filtering? (true)
+        bandstop (boolean): Do band-stop rather than band-pass
+    '''
+    N = data.shape[-1]
+    padded = np.zeros(data.shape[:-1]+(2*N,),dtype=data.dtype)
+    padded[...,N//2  :N//2+N] = data
+    padded[...,     :N//2  ] = data[...,N//2:0    :-1]
+    padded[...,N//2+N:     ] = data[...,-1 :N//2-1:-1]
+    if not fa is None and not fb is None:
+        if bandstop:
+            b,a = butter(order,np.array([fa,fb])/(0.5*Fs),btype='bandstop')
+        else:
+            b,a = butter(order,np.array([fa,fb])/(0.5*Fs),btype='bandpass')
+    elif not fa==None:
+        # high pass
+        b,a  = butter(order,fa/(0.5*Fs),btype='high')
+        assert not bandstop
+    elif not fb==None:
+        # low pass
+        b,a  = butter(order,fb/(0.5*Fs),btype='low')
+        assert not bandstop
+    else: raise Exception('Both fa and fb appear to be None')
+    return (filtfilt if zerophase else lfilter)(b,a,padded)[...,N//2:N//2+N]
+    assert 0

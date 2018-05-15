@@ -8,22 +8,22 @@ from __future__ import generators
 from __future__ import unicode_literals
 from __future__ import print_function
 
+import sys
 import numpy as np
-
 import scipy
-from functions import sexp,slog
 import warnings
+import traceback
+import functions
+
 from scipy.linalg import lstsq,pinv
 from numpy.linalg.linalg import cholesky as chol
 from numpy.linalg.linalg import LinAlgError
 
+from functions import sexp,slog
 from utilities import *
 from arguments import *
-
-import traceback
-
-import sys
 from utilities import current_milli_time
+from plot      import v2str_long
 
 def minimize_retry(objective,initial,jac=None,hess=None,
                    verbose=False,
@@ -34,36 +34,35 @@ def minimize_retry(objective,initial,jac=None,hess=None,
                    show_progress=True,
                    **kwargs):
     '''
-    call `scipy.optimize.minimize`, retrying a few times in case
-    one solver doesn't work
+    Call `scipy.optimize.minimize`, retrying a few times in case
+    one solver doesn't work.
     
-    # Try a few things before giving up
-    # Newton-CG should be pretty fast, but Hessian might have numeric problems
-    # If this failes, try the default BFGS solver, which uses only the gradient
-    # If this failes, try the simplex algorithm
+    This addresses unresolved bugs that can cause exceptions in some of
+    the gradient-based solvers in Scipy. If we happen upon these bugs, 
+    we can continue optimization using slower but more robused methods. 
     
-    There are some bugs in some optimization routines, 
-    also try to catch that stuff
+    Ultimately, this routine falls-back to the gradient-free Nelder-Mead
+    simplex algorithm, although it will try to use faster routines if
+    the hessian and gradient are providede. 
     '''
+    # Store and track result so we can keep best value, even if it crashes
     result = None
     x0     = np.array(initial).ravel()
     g0     = 1/np.zeros(x0.shape)
-    
     nfeval = 0
     ngeval = 0
-    
     if jac is True:
-        v,g = objective(x0)
-        best   = v
+        v,g  = objective(x0)
     else:
-        v = objective(x0)
-        best   = v
-
+        v    = objective(x0)
+    best = v
+    # Show progress of the optimization?
     if show_progress:
         sys.stdout.write('\n')
         last_shown = current_milli_time()
-        def progress_update():
-            nonlocal best, x0, nfeval, ngeval, last_shown
+    def progress_update():
+        nonlocal best, x0, nfeval, ngeval, last_shown
+        if show_progress: 
             if current_milli_time() - last_shown > 500:
                 ss = np.float128(best).astype(str)
                 ss += ' '*(20-len(ss))
@@ -71,7 +70,17 @@ def minimize_retry(objective,initial,jac=None,hess=None,
                 sys.stdout.write(out)
                 sys.stdout.flush()
                 last_shown = current_milli_time()
-
+    def clear_progress():
+        if show_progress: 
+            progress_update()
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+    # Wrap the provided gradient and objective functions, so that we can
+    # capture the function values as they are being optimized. This way, 
+    # if optimization throws an exception, we can still remember the best
+    # value it obtained, and resume optimization from there using a slower
+    # but more reliable method. These wrapper functions also act as 
+    # callbacks and allow us to print the optimization progress on screen.
     if jac is True:
         def wrapped_objective(params):
             nonlocal best, x0, nfeval, ngeval
@@ -81,8 +90,7 @@ def minimize_retry(objective,initial,jac=None,hess=None,
                 x0   = params
             nfeval += 1
             ngeval += 1
-            if show_progress:
-                progress_update()
+            progress_update()
             return v,g
     else:
         def wrapped_objective(params):
@@ -92,10 +100,8 @@ def minimize_retry(objective,initial,jac=None,hess=None,
                 best = v
                 x0   = params
             nfeval += 1
-            if show_progress:
-                progress_update()
+            progress_update()
             return v 
-    
     if hasattr(jac, '__call__'):
         # Jacobain is function
         original_jac = jac
@@ -104,85 +110,135 @@ def minimize_retry(objective,initial,jac=None,hess=None,
             nonlocal best, x0
             g = original_jac(params)
             ngeval += 1
-            if show_progress:
-                progress_update()
+            progress_update()
             return g
         jac = wrapped_jacobian
-    
+    # There are still some unresolved bugs in some of the optimizers that
+    # can lead to exceptions and crashes! This routine catches these errors
+    # and failes gracefully. Note that system interrupts are not caught, 
+    # and other unexpected errors are caught but reported, in case they
+    # reflect an exception arising from a user-provided gradient or 
+    # objective function.
     def try_to_optimize(method,validoptions,jac_=None):
         try:
             options = {k:v for (k,v) in kwargs.items() if k in validoptions.split()}
             result = scipy.optimize.minimize(wrapped_objective,x0.copy(),
                 jac=jac_,hess=hess,method=method,tol=tol,**options)
             _ = wrapped_objective(result.x)
+            clear_progress()
             if result.success: 
-                return x0
+                return True
             if verbose or printerrors:
-                warnings.warn('%s failed with message "%s"'%(method,result.message))
-        except (KeyboardInterrupt, SystemExit):
+                sys.stderr.write('%s reported "%s"\n'%(method,result.message))
+                sys.stderr.flush()
+        except (KeyboardInterrupt, SystemExit): 
+            # Don't catch system interrupts
             raise
-        except:
+        except (TypeError,NameError):
+            # Likely an internal bug in scipy; don't report it
+            clear_progress()
+            return False
+        except Exception:
+            # Unexpected error, might be user error, report it
+            traceback.print_exc()
+            clear_progress()
             if verbose or printerrors:
-                warnings.warn('Error using minimize with %s:'%method)
+                sys.stderr.write('Error using minimize with %s:\n'%method)
+                sys.stderr.flush()
                 traceback.print_exc()
-        finally:
-            if show_progress: 
-                sys.stdout.write('\r'+' '*80+'\r\n')
-    
+                sys.stderr.flush()
+            return False
+        return False
+    # We try a few different optimization, in order
+    # -- If Hessian is available, Newton-CG should be fast! try it
+    # -- Otherwise, BFGS is a fast gradient-only optimizer
+    # -- Fall back to Nelder-Mead simplex algorithm if all else fails
     try:
-        # If gradient is provided....
-        if not jac is None and not jac is False and not simplex_only:
-            try_to_optimize('Newton-CG','disp xtol maxiter eps',jac_=jac)
-            try_to_optimize('BFGS','disp gtol maxiter eps norm',jac_=jac)
-        # Without gradient...
-        if not simplex_only:
-            try_to_optimize('BFGS','disp gtol maxiter eps norm',
-            jac_=True if jac is True else None)
-        # Simplex is last resort, slower but robust
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore",message='Method Nelder-Mead does not use gradient information (jac)')
-            try_to_optimize('Nelder-Mead',
-                'disp maxiter maxfev initial_simplex xatol fatol',
-                jac_=True if jac is True else None)
-        total_failure = 'All minimization attempts failed'
+            warnings.filterwarnings("ignore",message='Method Nelder-Mead does not use')
+            warnings.filterwarnings("ignore",message='Method BFGS does not use')
+            # If gradient is provided....
+            if not jac is None and not jac is False and not simplex_only:
+                if try_to_optimize('Newton-CG','disp xtol maxiter eps',jac_=jac):
+                    return x0
+                if try_to_optimize('BFGS','disp gtol maxiter eps norm',jac_=jac):
+                    return x0
+            # Without gradient...
+            if not simplex_only:
+                if try_to_optimize('BFGS','disp gtol maxiter eps norm',\
+                    jac_=True if jac is True else None):
+                    return x0
+            # Simplex is last resort, slower but robust
+            if try_to_optimize('Nelder-Mead',
+                    'disp maxiter maxfev initial_simplex xatol fatol',
+                    jac_=True if jac is True else None):
+                return x0
     except (KeyboardInterrupt, SystemExit):
-        return x0
-
+        print('Best parameters are %s with value %s'%(v2str_long(x0),best))
+        raise
+    except Exception:
+        traceback.print_exc()
+        if not failthrough: raise
+    # If we've reached here, it means that all optimizers terminated with
+    # an error, or reported a failure to converge. If `failthrough` is 
+    # set, we can still return the best value found so far. 
     if failthrough:
         if verbose:
-            warnings.warn(total_failure)
+            sys.stderr.write('Minimization may not have converged\n')
+            sys.stderr.flush()
         return x0 # fail through
-    raise ArithmeticError(total_failure)
-    
+    raise ArithmeticError('All minimization attempts failed')
+
 def univariate_lgp_update_moment(m,v,y,s,dt,
-                    tol     = 1e-3,
-                    maxiter = 100,
-                    eps     = 1e-12):
+                    tol      = 1e-3,
+                    maxiter  = 100,
+                    eps      = 1e-7,
+                    minlrate = -200,
+                    maxlrate = 20,
+                    ngrid    = 50,
+                    minprec  = 1e-6,
+                    maxrange = 150):
+    '''
+    Update a log-Gaussian distribution with a Poisson measurement by
+    integrating to extract the posterior mean and variance.
+    '''
     # Get moments by integrating
     v = max(v,eps)
     t = 1/v
+    m = np.clip(m,minlrate,maxlrate)
     # Set integration limits
-    m0,s0 = (m,np.sqrt(v)) if t>1e-6 else (slog(y+0.25),np.sqrt(1/(y+1)))
-    x = np.linspace(m0-4*s0,m0+4*s0,25)
+    m0,s0 = (m,np.sqrt(v)) if t>minprec else (slog(y+0.25),np.sqrt(1/(y+1)))
+    m0 = np.clip(m0,minlrate,maxlrate)
+    delta = min(4*s0,maxrange)
+    x = np.linspace(m0-delta,m0+delta,ngrid)
     # Calculate likelihood contribution
-    rate = (x+s)*dt
-    l = y*(rate)-sexp(rate)
-    # Normalize to prevent overflow
-    l-= np.max(l)
+    r  = x + s + slog(dt)
+    ll = y*r-sexp(r)
     # Calculate prior contribution
-    l += -.5*(x-m)**2/v-.5*slog(v)
+    lq = -.5*((x-m)**2/v+slog(2*np.pi*v))
+    # "clean up" prior (numerical stability)
+    q  = np.maximum(eps,sexp(lq))
+    q  = q/np.sum(q)
+    lq = slog(q)
+    # Normalize to prevent overflow, calculate log-posterior
+    nn = np.max(ll)
+    lp = (ll - nn) + lq
     # Estimate posterior
-    p = sexp(l)
-    p[p<eps] = eps   
-    p /= np.sum(p)
-    # Integrate to get posterior moments
-    m  = np.sum(x*p)
-    v  = np.sum((x-m)**2*p)
-    return m,v
-    
+    p  = np.maximum(eps,sexp(lp))
+    s  = np.sum(p)
+    p /= s
+    # Integrate to get posterior moments and likelihood
+    pm = np.sum(x*p)
+    pv = np.sum((x-pm)**2*p)
+    ll = scipy.misc.logsumexp(ll+lq)
+    assertfinitereal(pm)
+    assertfinitereal(pv)
+    assertfinitereal(ll)
+    return pm,pv,ll
+
 def univariate_lgp_update_laplace(m,v,y,s,dt,
                     tol     = 1e-6,
-                    maxiter = 100,
+                    maxiter = 20,
                     eps     = 1e-12):
     '''
     Optimize using Laplace approximation
@@ -204,127 +260,124 @@ def univariate_lgp_update_laplace(m,v,y,s,dt,
         if not np.isfinite(mu) or not np.isfinite(rate):
             return np.inf
         return rate+1/v
-    # Try a few things before giving up
-    # Newton-CG should be pretty fast, but Hessian might have numeric problems
-    # If this failes, try the default BFGS solver, which uses only the gradient
-    # If this failes, try the simplex algorithm
-    mu = minimize_retry(objective,m,gradient,hessian,tol=1e-4)
+    mu = minimize_retry(objective,m,gradient,hessian,tol=tol,show_progress=False,printerrors=False)
     vv = 1/hessian(mu)
-    return mu, vv
+    # Get likelihood at posterior mode
+    logr   = mu+s+slog(dt)
+    logPyx = y*logr-sexp(logr)
+    ll     = logPyx + 0.5*slog(vv/v) - 0.5*(mu-m)**2/v 
+    return mu, vv, ll
 
 def univariate_lgp_update_variational(m,v,y,s,dt,
                     tol     = 1e-6,
-                    maxiter = 100,
+                    maxiter = 20,
                     eps     = 1e-12):
     '''
     Optimize variational approximation
     Mean and variance must be optimized jointly
+    Log-Gaussian / Poisson model
     '''
     v = max(v,eps)
     scale = dt*sexp(s)
     # Use minimization to solve for variational solution
     def objective(parameters):
         mq,vq = parameters
-        rate  = scale*np.exp(mq + 0.5*vq)
+        rate  = scale*np.exp(mq+ 0.5*vq)
         if vq<eps or not np.isfinite(mq) or not np.isfinite(vq) or not np.isfinite(rate):
             return np.inf
-        return -y*mq + rate + 0.5*( -slog(vq) + (vq + (mq-m)**2)/v )
+        return -y*mq + rate + 0.5*( -slog(vq) + vq/v + (mq-m)**2/v )
     def gradient(parameters):
         mq,vq = parameters
-        rate  = scale*np.exp(mq + 0.5*vq)
+        rate  = scale*np.exp(mq+ 0.5*vq)
         if vq<eps or not np.isfinite(mq) or not np.isfinite(vq) or not np.isfinite(rate):
-            return (NaN,NaN)
+            return (np.NaN,np.NaN)
         dm    = -y + rate + (mq-m)/v
         dv    = rate*0.5 + 0.5*(1/v-1/vq)
-        return array([dm, dv]).squeeze()
+        return np.array([dm, dv]).squeeze()
     def hessian(parameters):
         mq,vq = parameters
-        rate  = scale*np.exp(mq + 0.5*vq)
+        rate  = scale*np.exp(mq+ 0.5*vq)
         if vq<eps or not np.isfinite(mq) or not np.isfinite(vq) or not np.isfinite(rate): 
-            return [[NaN,NaN],[NaN,NaN]]
+            return [[np.NaN,np.NaN],[np.NaN,np.NaN]]
         dmdm  = rate + 1/v
         dvdm  = rate*0.5
         dvdv  = rate*0.25 + 0.5/vq**2
-        return array([[dmdm,dvdm],[dvdm,dvdv]]).squeeze()
-    return minimize_retry(objective,[m,v],gradient,hessian,tol=1e-4)
-
+        return np.array([[dmdm,dvdm],[dvdm,dvdv]]).squeeze()
+    mp,vp = minimize_retry(objective,[m,v],gradient,hessian,tol=tol,show_progress=False,printerrors=False)
+    # Get likelihood using log-Gaussian assumption
+    logr   = mp+s+slog(dt)
+    logPyx = y*logr-sexp(logr+0.5*vp)
+    ll     = logPyx + 0.5*slog(vp/v) - 0.5*(mp-m)**2/v 
+    return mp, vp, ll
     
-def assertshape(M,shape):
-    if isinstance(M,(tuple,list)):
-        M = np.array(M)
-    if not M.shape==shape:
-        raise ValueError('Expected shape (%s) but found shape (%s)'%(shape,M.shape))
-    return M
+def univariate_lgp_update_variational_so(m,v,y,s,dt,
+                    tol     = 1e-6,
+                    maxiter = 20,
+                    eps     = 1e-12):
+    '''
+    Optimize variational approximation
+    Mean and variance must be optimized jointly
+    2nd order Gaussian/Poisson model approximation
+    '''
+    v = max(v,eps)
+    scale = dt*sexp(s)
+    # Use minimization to solve for variational solution
+    def objective(parameters):
+        mq,vq = parameters
+        rate  = scale*np.exp(mq)*(1 + 0.5*vq)
+        if vq<eps or not np.isfinite(mq) or not np.isfinite(vq) or not np.isfinite(rate):
+            return np.inf
+        return -y*mq + rate + 0.5*( -slog(vq) + vq/v + (mq-m)**2/v )
+    def gradient(parameters):
+        mq,vq = parameters
+        rate  = scale*np.exp(mq)*(1 + 0.5*vq)
+        if vq<eps or not np.isfinite(mq) or not np.isfinite(vq) or not np.isfinite(rate):
+            return (np.NaN,np.NaN)
+        dm    = -y + rate + (mq-m)/v
+        dv    = rate*0.5 + 0.5*(1/v-1/vq)
+        return np.array([dm, dv]).squeeze()
+    def hessian(parameters):
+        mq,vq = parameters
+        rate  = scale*np.exp(mq)*(1 + 0.5*vq)
+        if vq<eps or not np.isfinite(mq) or not np.isfinite(vq) or not np.isfinite(rate): 
+            return [[np.NaN,np.NaN],[np.NaN,np.NaN]]
+        dmdm  = rate + 1/v
+        dvdm  = rate*0.5
+        dvdv  = rate*0.25 + 0.5/vq**2
+        return np.array([[dmdm,dvdm],[dvdm,dvdv]]).squeeze()
+    mp,vp = minimize_retry(objective,[m,v],gradient,hessian,tol=tol,show_progress=False,printerrors=False)
+    # Get likelihood using second order assumption
+    logr   = mp+s+slog(dt)
+    logPyx = y*logr-sexp(logr)*(1+0.5*vp)
+    ll     = logPyx + 0.5*slog(vp/v) - 0.5*(mp-m)**2/v 
+    return mp, vp, ll
 
 def measurement_update_projected_gaussian(m1,m2,y,b,s,dt,pm,pt,
                                           univariate_method = univariate_lgp_update_moment,
-                                          eps=1e-6,
+                                          eps=1e-7,
                                           safe=False):
     """
+    This performs an approximation to the non-conjudate log-Gaussian
+    Poisson measurement update, and then propagates the result of this 
+    update to the full jointly-Gaussian model of the history process.
     
+    The non-conjugate update can be performed via one of several 
+    approximation functions, including
     
-    Derivation of Kalman update stored here
+     - moment matching (`univariate_lgp_update_moment`)
+     - Laplace approximation (`univariate_lgp_update_laplace`)
+     - Variational with log-Gaussian assumption (`univariate_lgp_update_variational`)
+     - Variational with second-order moment assumption (`univariate_lgp_update_variational_so`)
     
+    Propagation to the full jointly Gaussian history model can be thought
+    of as multiplying the updated marginal Gaussian by a conditional
+    gaussian representing the subspace of the prior that is orthogonal to
+    the updated projection. 
     
-    '''
-    # Original multivariate update (slower)
-    # Multivariate update
-    #bt  = b*tr
-    #c   = I+m2.dot(bt.dot(b.T))
-    #m1p = ascolumn(linv(c,m2.dot(bt*mr) + m1))
-    #m2p = linv(c,m2)
-    '''
-    '''
-    # Perform Multivariate update using Kalman update
-    # Here is the update in terms that match
-    # https://en.wikipedia.org/wiki/Kalman_filter
-    # where y has been replaced by w
-    H = b.T
-    z = ascolumn(mr)
-    R = assquare(1/tr)
-    P = m2
-    x = m1
-    w = z - H.dot(x)
-    S = R + H.dot(P).dot(H.T)
-    #K = P.dot(H.T).dot(inv(S))
-    K = linv(S.T,H.dot(P)).T
-    x = x + K.dot(w)
-    J = I - K.dot(H)
-    P = J.dot(P).dot(J.T) + K.dot(R).dot(K.T)
-    m1p = ascolumn(x)
-    m2p = P
-    '''
-    '''
-    # Here is the update defined in terms of local variables
-    # (not renamed to match wikipedia
-    vr = 1/tr
-    w = ascolumn(mr) - b.T.dot(m1)
-    S = assquare(vr) + b.T.dot(m2).dot(b)
-    K = linv(S.T,b.T.dot(m2)).T
-    m1p = m1 + K.dot(w)
-    J = I - K.dot(b.T)
-    m2p = J.dot(m2).dot(J.T) + K.dot(assquare(vr)).dot(K.T)
-    '''
-    '''
-    # Here is the update keeping scalars as scalars
-    vr  = 1/tr
-    w   = mr - scalar(b.T.dot(m1))        # scalar
-    S   = vr + scalar(b.T.dot(m2).dot(b)) # scalar
-    K   = ascolumn(b.T.dot(m2))/s         # column vector
-    m1p = m1 + K*w                        # column vector
-    J   = I - K.dot(b.T)                  # matrix
-    m2p = J.dot(m2).dot(J.T) + (K.dot(K.T)) * vr
-    '''
-    '''
-    # Here is the update keeping scalars as scalars
-    vr = scalar(1/tr)
-    w = mr - m       # scalar
-    S = vr + v       # scalar
-    K = m2b/S  # column vector
-    m1p = m1 + K*w
-    J = I - K.dot(b.T)
-    m2p = J.dot(m2).dot(J.T) + (K*vr).dot(K.T)
-    '''
+    This can also be thought of as constructing a "surrogate" gaussian
+    likelihood representing the shifted mean and added precision introduced
+    by the measurement, and then performing a Kalman-filter-style update
+    on the full jointly Gaussian latent space. 
     
     Parameters
     ----------
@@ -363,7 +416,7 @@ def measurement_update_projected_gaussian(m1,m2,y,b,s,dt,pm,pt,
     mq = (m*t+pm*pt)/tq
     vq  = 1/tq
     # Integrate to get posterior moments
-    mp,vp = univariate_method(mq,vq,y,s,dt)
+    mp,vp,ll = univariate_method(mq,vq,y,s,dt)
     if safe:
         mp = scalar(assertfinitereal(mp))
         vp = scalar(assertfinitereal(vp))
@@ -371,30 +424,45 @@ def measurement_update_projected_gaussian(m1,m2,y,b,s,dt,pm,pt,
     tp = 1/vp
     # Generate surrogate univariate likelihood
     tr = max(eps,tp-t)
+    vr = scalar(1/tr)
     mr = (mp*tp-m*t)/tr
     if safe:
         mr = scalar(assertfinitereal(mr))
         tr = scalar(assertfinitereal(tr))
-    # Futher optimized
-    vr  = scalar(1/tr)
+    # Optimized Kalman update (speed over stability)
     K   = m2b/(vr+v)
     m2p = m2 - K.dot(m2b.T)
     m1p = m1 + K*(mr-m)
-    # Also compute log-likelihood from univariate
-    logr   = mp+s
-    logPyx = y*logr-sexp(logr)
-    ll     = logPyx + 0.5*slog(vp/v) - 0.5*(mp-m)**2/v 
-
-    return m1p, m2p, scalar(ll)
+    if safe:
+        assertfinitereal(m1p)
+        assertfinitereal(m2p)
+    # Compute log-likelihood from univariate
+    #logr   = mp+s
+    #logPyx = y*logr-sexp(logr)
+    #ll     = logPyx + 0.5*slog(vp/v) - 0.5*(mp-m)**2/v 
+    return m1p, m2p, scalar(ll), mr, vr
     
     
 def measurement_update_projected_gaussian_surrogate(m1,m2,y,b,s,dt,pm,pt,
                                       univariate_method = univariate_lgp_update_moment,
                                       return_surrogate=False,
                                       surrogate=None,
-                                      eps=1e-6,
+                                      eps=1e-12,
                                       safe=False):
     '''
+    Please see `measurement_update_projected_gaussian`. 
+    
+    This function is the same, except that it can return "surrogate"
+    gaussian approximations of the measurement updates, which can then
+    be used in subsequent filtering of the same data for much more rapid
+    measurement updates.
+    
+    If the parameters do not change too much, these surrogate updates
+    will remain approximately correct. This provides a path toward an 
+    approximate EM-style algorithm for optimizing the likelihood using
+    moment-closures as an additional likelihood penalty (regularizer) for
+    slow dynamics.
+    
     Parameters
     ----------
     m1 : first moment (mean of multivariate gaussian)
@@ -411,72 +479,44 @@ def measurement_update_projected_gaussian_surrogate(m1,m2,y,b,s,dt,pm,pt,
         univariate_lgp_update_laplace
     '''
     
+    if surrogate is None:
+        return measurement_update_projected_gaussian(m1,m2,y,b,s,dt,pm,pt,
+                                          univariate_method = univariate_method,
+                                          eps=eps,
+                                          safe=safe)
+    (mr, vr) = surrogate
     # Validate arguments
     if safe:
         m2 = assertfinitereal(assertsquare(m2))
         m1 = assertfinitereal(assertcolumn(m1))
         b  = assertfinitereal(assertcolumn(b))
-    
-    # Prior projected onto log-rate
+    # Precompute constants
+    m2 = 0.5*(m2+m2.T)
+    # Gaussian state prior on log-rate
     m2b = m2.dot(b)
+    if safe:
+        v   = scalar(b.T.dot(m2b))
+        m   = scalar(b.T.dot(m1))
     v   = max(eps,(b.T.dot(m2b))[0,0])
     m   = (b.T.dot(m1))[0,0]
     t   = 1/v
-    
-    if not surrogate is None:
-        t   = 1/max(eps,v)
-        # Surrograte measurement in log rate
-        (mr, tr) = surrogate
-        vr  = 1/max(eps,tr)
-        # Posterior in log rate
-        mp  = (mr*v + vr*m)/(vr+v)
-        tp  = max(eps,tr + t)
-        vp  = 1/tp
-        # Log-likelihood
-        lgr = mp+s
-        ll  = y*lgr-sexp(lgr) - 0.5*(slog(v/vp)+(mp-m)**2*t)
-        assertfinitereal(ll)
-        # Kalman update
-        K   = m2b/(vr+v)
-        m2p = m2 - K.dot(m2b.T)
-        m1p = m1 + K*(mr-m)
-        return m1p, m2p, ll
-    
-    else:
-        # Regularizing Gaussian prior on log-rate
-        t   = 1/v
-        tq  = pt + t
-        mq  = (m*t+pm*pt)/tq
-        vq  = 1/tq
-        # Integrate to get posterior moments
-        mp,vp = univariate_method(mq,vq,y,s,dt)
-        if safe:
-            mp = scalar(assertfinitereal(mp))
-            vp = scalar(assertfinitereal(vp))
-        vp = max(eps,vp)
-        tp = 1/vp
-        # Generate surrogate univariate likelihood
-        tr = max(eps,tp-t)
-        mr = (mp*tp-m*t)/tr
-        if safe:
-            mr = scalar(assertfinitereal(mr))
-            tr = scalar(assertfinitereal(tr))
-        # Futher optimized
-        vr  = scalar(1/tr)
-        K   = m2b/(vr+v)
-        m2p = m2 - K.dot(m2b.T)
-        m1p = m1 + K*(mr-m)
-        # Also compute log-likelihood from univariate
-        logr   = mp+s
-        ll     = y*logr-sexp(logr) + 0.5*(slog(vp*t)-(mp-m)**2*t)
-        return m1p, m2p, ll, (mr, tr)
-        
-        
-        
-        
-        
-
-        
-        
-        
-        
+    # Regularizing Gaussian prior on log-rate
+    tq  = pt + t
+    mq = (m*t+pm*pt)/tq
+    vq  = 1/tq
+    tr = 1/vr
+    tp = tq + tr
+    mp = (mr*tr + mq*tq)/tp
+    vp = 1/tp
+    if safe:
+        mp = scalar(assertfinitereal(mp))
+        vp = scalar(assertfinitereal(vp))
+    # Futher optimized
+    K   = m2b/(vr+v)
+    m2p = m2 - K.dot(m2b.T)
+    m1p = m1 + K*(mr-m)
+    # Also compute log-likelihood from univariate
+    logr   = mp+s
+    logPyx = y*logr-sexp(logr)
+    ll     = logPyx + 0.5*slog(vp/v) - 0.5*(mp-m)**2/v 
+    return m1p, m2p, scalar(ll)

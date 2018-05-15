@@ -8,9 +8,9 @@ from __future__ import generators
 from __future__ import unicode_literals
 from __future__ import print_function
 
+import sys
 import numpy as np
 import scipy
-from   functions import sexp,slog
 import warnings
 
 from scipy.linalg        import lstsq,pinv
@@ -20,10 +20,15 @@ from numpy.linalg.linalg import LinAlgError
 from measurements import *
 from utilities    import *
 from arguments    import *
+from functions    import sexp,slog
+from utilities import current_milli_time
 
-def ensemble_sample(stim,B,beta,M=100):
+def ensemble_sample(stim,B,beta,M=100,maxrate=100):
     '''
     Sample from an autoregressive point-process model. 
+    
+    This is discrete time, and allows only one spike per time point.
+    It may under-estimate self-excitation. 
     
     Parameters
     ----------
@@ -45,12 +50,69 @@ def ensemble_sample(stim,B,beta,M=100):
     y = np.zeros((T,M))
     l = np.zeros((T,M))
     b = beta.T.dot(B)
+    maxlograte = np.log(maxrate)
     for i,s in enumerate(stim):
         l[i,:]  = s + b.dot(h)
-        y[i,:]  = np.random.poisson(np.exp(l[i]))>0
+        rate    = np.exp(np.minimum(maxlograte,l[i]))
+        y[i,:]  = np.random.poisson(rate)>0
         h[1:,:] = h[:-1,:]
         h[0,:]  = y[i,:]
     return y,l
+
+def ensemble_sample_continuous(stim,B,beta,oversample=10,M=100,maxrate=100):
+    '''
+    Sample from an autoregressive point-process model. 
+    Use continuous time
+    
+    Parameters
+    ----------
+    stim: Effective input. Incorporates filtered stimulus and constant offset
+    B: History basisa
+    beta: Projection from the history basis onto log-rate
+
+    Other Parameters
+    ----------------
+    M: number of samples to draw
+    
+    Returns
+    -------
+    y : ntime x nsamples matrix of point-process samples
+    '''
+    K,N = B.shape
+    
+    # Create discrete differentiation operator
+    Dtau = -np.eye(N) + np.eye(N,k=-1)
+    # Create delta operator (to inject signal into delay line)
+    S = np.zeros((N,1))
+    S[0,0] = 1
+    # Perform a change of basis from function space into the basis projection B
+    A = B.dot(Dtau).dot(pinv(B))
+    C = B.dot(S)
+    
+    T = len(stim)
+    z = np.zeros((K,M))
+    dtf = 1.0 / oversample
+    F1  = scipy.linalg.expm(A*dtf)
+    ally = np.zeros((T,M))
+    alll = np.zeros((T,M))
+    maxlograte = np.log(maxrate)
+    time = 0.0
+    for i,s in enumerate(stim):
+        ytotal = np.zeros(M)
+        while time<i+1:
+            l  = s + beta.T.dot(z)
+            dt = np.exp(-(np.max(l)+1))
+            dt = min(0.2,dt)
+            dt = max(1e-12,dt)
+            lr = np.minimum(l+np.log(dt),maxlograte)
+            r  = np.exp(lr)
+            y  = np.random.poisson(r).ravel()>1
+            z  = scipy.linalg.expm(A*dt).dot(z) + C*y
+            time += dt
+            ytotal += y
+        alll[i,:] = s + beta.T.dot(z)
+        ally[i,:] = ytotal
+    return ally,alll
 
 def ensemble_sample_moments(stim,B,beta,M=1000):
     '''
@@ -248,7 +310,8 @@ def langevin_sample_expected(stim,A,beta,C,
                     maxrate    = 4,
                     oversample = 4):
     '''
-    
+    Sample the log rate and basis-approximated history process from the
+    Langevin approximation.
     '''
     maxlograte = np.log(maxrate)
     dtfine     = dt/oversample
@@ -268,8 +331,8 @@ def langevin_sample_expected(stim,A,beta,C,
         allz[i] = z
     return l,allz
     
-    
 from scipy.special import polygamma
+
 def inversepolygamma(n,x,iterations=1500,tol=1e-16):
     '''
     The Gaussian moment closure computes <λ> and <λh> under the assumption
@@ -288,9 +351,17 @@ def inversepolygamma(n,x,iterations=1500,tol=1e-16):
     of the Gamma distribution (transformed to a distribution on ln λ). 
     This is sometimes called the "exp-gamma" distribution.
     
-    This distributional assumption can then be used to compute expectations.
-    This idea is quite general, and the Gamma assumption didn't turn out to
-    be all that more accurate in practice.
+    We have not investigated the overall accuracy of this alternative 
+    moment-closure. 
+    
+    This moment closure appears to suffer from large errors when variance
+    is large, possibly similar to the effect of outliers observed in the 
+    log Gaussian moment closure. 
+    
+    However, it is possible to use a polynomial approximation to this 
+    moment closure that is accurate for "reasonable" values of the variance,
+    and diverges less dramatically for large variance. Please see the
+    function `robust_expgammameancorrection`.
     '''
     x = np.maximum(x,1e-19)
     x = np.array(x)
@@ -316,7 +387,7 @@ def robust_expgammameancorrection(v):
     
     This was obtained by regressing a quadratic polynomial to the 
     exact solution for gamma moment-matching of the mean / variance for
-    predicting <λ>. This is experimental!
+    predicting <λ>.
     '''
     return 1+0.33257734*v+0.04030693*v**2
 
@@ -353,11 +424,19 @@ def get_moment_integrator(int_method,Adt):
     linear forward-Euler integrators for moments
     '''
     F1  = scipy.linalg.expm(Adt)
+    I   = np.eye(Adt.shape[0])
     if int_method=="exponential":
         # Integrate locally linearized system via exponentiation
         mean_update = lambda M1: F1.dot(M1)
         def cov_update(M2,J):
             F2 = scipy.linalg.expm(J)
+            return F2.dot(M2).dot(F2.T)
+    elif int_method=="approximate_exponential":
+        # Exponential for the means, but use 1st order Taylor for
+        # getting the exponential for the covariance
+        mean_update = lambda M1: F1.dot(M1)
+        def cov_update(M2,J):
+            F2 = I + J
             return F2.dot(M2).dot(F2.T)
     elif int_method=="euler":
         # Integrate locally linearized system via forward Euler method
@@ -376,15 +455,17 @@ def integrate_moments(stim,A,beta,C,
     maxvcorr   = 2000,
     method     = "moment_closure",
     int_method = "euler",
-    reg_cov    = 1e-6):
+    reg_cov    = 1e-6,
+    safemode   = "assert"):
     '''
+    Integrate moment equations for autoregressive PPGLM
     
     Parameters
     ----------
     stim : zero-lage effective input (filtered stimulus plus mean offset)
     A : forward operator for delay-line evolution
-    C : projection of current state onto delay-like
     beta : basis history weights
+    C : projection of current state onto delay-like
     
     Other Parameters
     ----------------
@@ -407,6 +488,12 @@ def integrate_moments(stim,A,beta,C,
         Integration method. Can be either "euler" for forward-Euler, or 
         "exponential", which integrates the locally-linearized system 
         forward using matrix exponentiation (slower).
+    reg_cov: 
+        Small diagonal regularization for covariance matrix
+    safemode: string
+        Whether to check, repair NaNs and singular covariance. 
+        if "assert", NaNs will trigger assertion error,
+        if "repair", NaNs will be silently corrected
     
     Returns
     -------
@@ -440,15 +527,19 @@ def integrate_moments(stim,A,beta,C,
     # Integrate
     for i,s in enumerate(stim):
         for j in range(oversample):
-            assert(np.all(np.isfinite(M1)) and np.all(np.isfinite(M2)))
+            if   safemode=="assert":
+                assert(np.all(np.isfinite(M1)) and np.all(np.isfinite(M2)))
+            elif safemode=="repair":
+                M1[~np.isfinite(M1)] = 0
+                M2[~np.isfinite(M2)] = 0
             logv  = beta.T.dot(M2).dot(beta)
             logx  = min(beta.T.dot(M1)+s,maxlogr)
             R0    = sexp(logx)*dtfine
             Rm,J  = update(logx,logv,R0,M1,M2)
             M2    = cov_update(M2,J) + CC*Rm
             M1    = mean_update(M1) + C*Rm
-        # Maybe needed, maybe not?
-        # M2 = repair_covariance(M2,reg_cov)
+        if safemode=="repair":
+            M2 = repair_covariance(M2,reg_cov)
         allM1[i] = M1[:,0]
         allM2[i] = M2
         allLR[i] = logx
@@ -459,11 +550,12 @@ def get_measurement(measurement):
     '''
     Get measurement update function for forward filtering
     '''
-    if measurement in ('laplace','variational','moment'):
+    if measurement in ('laplace','variational','moment','variational_so'):
         measurement = {
-            'laplace'    :univariate_lgp_update_laplace,
-            'variational':univariate_lgp_update_variational,
-            'moment'     :univariate_lgp_update_moment,
+            'laplace'       :univariate_lgp_update_laplace,
+            'variational'   :univariate_lgp_update_variational,
+            'moment'        :univariate_lgp_update_moment,
+            'variational_so':univariate_lgp_update_variational_so, # experimental
         }[measurement]
     elif not hasattr(measurement, '__call__'):
         raise ValueError("measurement must be variational, laplace, moment, or a function")
@@ -471,7 +563,7 @@ def get_measurement(measurement):
 
 def get_ll(M1,C1,M2,C2,beta,s,y):
     '''
-    Compute negative log-likelihood up to a constant
+    Compute negative log-likelihood up to a constant.
 
     Parameters
     ----------
@@ -488,7 +580,6 @@ def get_ll(M1,C1,M2,C2,beta,s,y):
     C1   = assertfinitereal(assquare(C1))
     C2   = assertfinitereal(assquare(C2))
     beta = assertfinitereal(ascolumn(beta))
-    #raise NotImplementedError('There is a bug here, fix before using')
     logr   = beta.T.dot(M1)+s
     logPyx = y*logr - sexp(logr)
     Ch     = trychol(C1,1e-6)
@@ -519,7 +610,6 @@ def get_ll_univariate(m1,v1,m2,v2,beta,s,y):
     ll = logPyx + 0.5*slog(v2/v1) - 0.5*(m2-m1)**2/v1 
     return scalar(ll)
 
-
 def filter_moments(stim,Y,A,beta,C,m,
     dt          = 1.0,
     oversample  = 10,
@@ -528,8 +618,14 @@ def filter_moments(stim,Y,A,beta,C,m,
     method      = "moment_closure",
     int_method  = "euler",
     measurement = "moment",
-    reg_cov     = 0.01,
-    reg_rate    = 0.001):
+    reg_cov     = 0,
+    reg_rate    = 0,
+    return_surrogates  = False,
+    use_surrogates     = None,
+    initial_conditions = None,
+    progress           = False,
+    safe               = True):
+    
     '''
     Parameters
     ----------
@@ -561,6 +657,25 @@ def filter_moments(stim,Y,A,beta,C,m,
         Integration method. Can be either "euler" for forward-Euler, or 
         "exponential", which integrates the locally-linearized system 
         forward using matrix exponentiation (slower).
+    measurement:
+        "moment", "laplace", or "variational"
+    reg_cov:
+        Diagonal covariance regularization
+    reg_rate:
+        Small regularization toward log mean-rate; This parameter reflects
+        the precision of a Gaussian prior about the log mean-rate, applied 
+        at every measurement update.
+    return_surrogates: bool
+        If true, Gaussian approximations of measurement likelihoods are
+        returned. 
+    use_surrogates: None or tuple
+        Can be set as tuple of (means, variances) for Gaussian
+        approximations of meausrement updates.
+    initial_conditions: None or tuple
+        Can be set to a tuple (M1,M2) of initial conditions for moment
+        filtering.
+    progress: boolean
+        Whether to report progress
     
     Returns
     -------
@@ -576,6 +691,11 @@ def filter_moments(stim,Y,A,beta,C,m,
     A    = assquare(A)
     if oversample<1:
         raise ValueError('oversample must be non-negative integer')
+    if method=="moment_closure" and measurement=="variational":
+        warnings.warn("There are unresolved numerical stability issues "\
+        "when using the log-Gaussian variational update with Gaussian "\
+        "moment closure. Suggest using the second-order moment closure "\
+        "instead")
     # Precompute constants
     maxlogr   = np.log(maxrate)
     maxratemc = maxvcorr*maxrate
@@ -586,55 +706,93 @@ def filter_moments(stim,Y,A,beta,C,m,
     Cb        = C.dot(beta.T)
     CC        = C.dot(C.T)
     Adt       = A*dtfine
+    if not use_surrogates is None:
+        MR,VR = use_surrogates
     # Get measurement update function
     measurement = get_measurement(measurement)
     # Buid moment integrator functions
     mean_update, cov_update = get_moment_integrator(int_method,Adt)
     # Get update function (computes expected rate from moments)
     update = get_update_function(method,Cb,Adt,maxvcorr)
-    # accumulate negative log-likelihood up to a constant
+    # Accumulate negative log-likelihood up to a constant
     nll = 0
     llrescale = 1.0/len(stim)
+    if initial_conditions is None:
+        # Initial condition for moments
+        M1 = np.zeros((K,1))
+        M2 = np.eye(K)*1e-6
+    else:
+        M1,M2 = initial_conditions
     # Store moments
     allM1 = np.zeros((T,K))
     allM2 = np.zeros((T,K,K))
     allLR = np.zeros((T))
     allLV = np.zeros((T))
-    # Initial condition for moments
-    M1 = pinv(beta,m).reshape((K,1))
-    M2 = np.eye(K)*1e-2
+    allmr = np.zeros((T))
+    allvr = np.zeros((T))
+    if progress:
+        last_shown = current_milli_time()
     for i,s in enumerate(stim):
         # Regularize
-        strength = reg_cov+max(0,-np.min(np.diag(M2)))
-        M2 = 0.5*(M2+M2.T) + strength*np.eye(K) 
-        
+        if reg_cov>0:
+            strength = reg_cov+max(0,-np.min(np.diag(M2)))
+            M2 = 0.5*(M2+M2.T) + strength*np.eye(K) 
         # Integrate moments forward
         for j in range(oversample):
             logv  = beta.T.dot(M2).dot(beta)
             logx  = min(beta.T.dot(M1)+s,maxlogr)
-            R0    = sexp(logx)*dtfine
+            R0    = sexp(logx)
+            R0    = min(maxrate,R0)
+            R0   *= dtfine
             Rm,J  = update(logx,logv,R0,M1,M2)
             M2    = cov_update(M2,J) + CC*Rm
             M1    = mean_update(M1)  + C*Rm
+            if safe:
+                M1    = np.clip(M1,-100,100)
+                M2    = np.clip(M2,-100,100)
         # Measurement update
         pM1,pM2 = M1,M2
-        M1,M2,ll = measurement_update_projected_gaussian(\
-                  M1,M2,Y[i],beta,s,dt,m,reg_rate,measurement)
-        nll -= ll*llrescale
+        if use_surrogates is None:
+            # Use specified approximation method to handle non-conjugate
+            # log-Gaussian Poisson measurement update
+            M1,M2,ll,mr,vr = measurement_update_projected_gaussian(\
+                      M1,M2,Y[i],beta,s,dt,m,reg_rate,measurement)
+            allmr[i] = mr
+            allvr[i] = vr
+        else:
+            # Use specified Gaussian approximations (MR,VR) to the 
+            # measurement likelihoods.
+            M1,M2,ll = measurement_update_projected_gaussian_surrogate(\
+                      M1,M2,Y[i],beta,s,dt,m,reg_rate,measurement,
+                                      return_surrogate=False,
+                                      surrogate=(MR[i],VR[i]))
+        if safe:
+            M1    = np.clip(M1,-100,100)
+            M2    = np.clip(M2,-100,100)
         # Store moments
         allM1[i] = M1[:,0].copy()
         allM2[i] = M2.copy()
         allLR[i] = min(beta.T.dot(M1)+s,maxlogr)
         allLV[i] = beta.T.dot(M2).dot(beta)
-        
-
-        # Heuristic: detect numerical failure and exit early
-        failed = False
-        failed|= np.any(M1)<-1e5
-        failed|= logx>100*maxlogr
-        failed|= nll<-1e10
-        if failed:
-            nll = np.inf
-            break
-    return allLR,allLV,allM1,allM2,nll
+        nll -= ll*llrescale
+        if safe:
+            # Heuristic: detect numerical failure and exit early
+            failed = np.any(M1)<-1e5
+            failed|= logx>100*maxlogr
+            failed|= nll<-1e10
+            if failed:
+                nll = np.inf
+                break
+        if progress and current_milli_time()-last_shown>500:
+            sys.stdout.write('\r%02.02f%%'%(i*100/T))
+            sys.stdout.flush()
+            last_shown = current_milli_time()
+    if progress:
+        sys.stdout.write('\r100.00%')
+        sys.stdout.flush()
+        sys.stdout.write('\n')
+    if return_surrogates:
+        return allLR,allLV,allM1,allM2,nll,allmr,allvr
+    else:
+        return allLR,allLV,allM1,allM2,nll
     
