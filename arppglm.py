@@ -396,23 +396,48 @@ def get_update_function(method,Cb,Adt,maxvcorr):
     Generate update function for moment integration.
     
     Valid methods are LNA, moment_closure, and second_order
+
+    Parameters
+    ----------
+    method: string
+        Valid methods are `LNA`, `moment_closure`, and `second_order`
+    Cb: matrix
+        Precomputed C.dot(beta.T), where C is the basis-projected 
+        "signal-injection" operator for the history process
+    Adt: square matrix
+        forward evolution operator premultiplied by time step
+    maxvcorr: scalar
+        Maximum corrected variance (for artifically enforcing hard-
+        limits on stability of the ODE moment equations)
+
+    Returns
+    -------
+    update: function
+        Update function accepting parameters `logx`, `logv`, `R0`, `M1`, and `M2`,
+        where `logx` and `logv` are the means and the variance of the log-intensity,
+        `R0` is the uncorrected estimate of the mean intensity. Function returns
+        the corrected mean `Rm` and the system Jacobian `J`.
     '''
     if method=="LNA":
-        def update(logx,logv,Rm,M1,M2):\
-            return Rm,Cb*Rm+Adt
+        def update(logx,logv,Rm,M1,M2):
+            J = Cb*Rm+Adt
+            return Rm,J
     elif method=="second_order":
         def update(logx,logv,R0,M1,M2):
             Rm = R0 * min(1+0.5*logv,maxvcorr)
-            return Rm,Cb*R0+Adt
+            J  = Cb*R0+Adt
+            return Rm,J
     elif method=="moment_closure":
         def update(logx,logv,R0,M1,M2):
             Rm = R0 * min(sexp(0.5*logv),maxvcorr)
-            return Rm,Cb*Rm+Adt
+            J  = Cb*Rm+Adt
+            return Rm,J
     elif method=="approximate_gamma":
         def update(logx,logv,R0,M1,M2):
             correction = min(robust_expgammameancorrection(logv),maxvcorr)
             Rm = R0*correction
-            return Rm,Cb*R0+Adt
+            J  = Cb*R0+Adt
+            return Rm,J
     else:
         raise ValueError("method must be LNA, second_order, or moment_closure.\n"\
                          "`approximate_gamma` is defined, but is experimental.")
@@ -422,6 +447,20 @@ def get_moment_integrator(int_method,Adt):
     '''
     Generates either exponential-Euler or 
     linear forward-Euler integrators for moments
+
+    Parameters
+    ----------
+    int_method: string
+        One of either "exponential", "approximate_exponential", or "euler"
+    Adt: square matrix
+        forward evolution operator premultiplied by time step
+
+    Returns
+    -------
+    mean_update: function: vector → vector
+        Mean update function, updates mean vector one time step
+    cov_update: function: matrix → matrix
+        Covariance update function, updates covariance matrix one time step.
     '''
     F1  = scipy.linalg.expm(Adt)
     I   = np.eye(Adt.shape[0])
@@ -432,7 +471,7 @@ def get_moment_integrator(int_method,Adt):
             F2 = scipy.linalg.expm(J)
             return F2.dot(M2).dot(F2.T)
     elif int_method=="approximate_exponential":
-        # Exponential for the means, but use 1st order Taylor for
+        # Exponential for the means, but use 1st-order Taylor for
         # getting the exponential for the covariance
         mean_update = lambda M1: F1.dot(M1)
         def cov_update(M2,J):
@@ -532,12 +571,19 @@ def integrate_moments(stim,A,beta,C,
             elif safemode=="repair":
                 M1[~np.isfinite(M1)] = 0
                 M2[~np.isfinite(M2)] = 0
+            # Marginal variance and mean of the predicted log-rate
+            # (This is a linear projection of the process history)
             logv  = beta.T.dot(M2).dot(beta)
             logx  = min(beta.T.dot(M1)+s,maxlogr)
+            # Uncorrected rate estimate
             R0    = sexp(logx)*dtfine
+            # Covariance corrected rate estimate Rm
+            # And system Jacobian J
             Rm,J  = update(logx,logv,R0,M1,M2)
+            # Moment updates with new mean and variance
+            # proportional to corrected rate Rm
             M2    = cov_update(M2,J) + CC*Rm
-            M1    = mean_update(M1) + C*Rm
+            M1    = mean_update(M1)  + C *Rm
         if safemode=="repair":
             M2 = repair_covariance(M2,reg_cov)
         allM1[i] = M1[:,0]
@@ -746,7 +792,7 @@ def filter_moments(stim,Y,A,beta,C,m,
             R0   *= dtfine
             Rm,J  = update(logx,logv,R0,M1,M2)
             M2    = cov_update(M2,J) + CC*Rm
-            M1    = mean_update(M1)  + C*Rm
+            M1    = mean_update(M1)  + C *Rm
             if safe:
                 M1    = np.clip(M1,-100,100)
                 M2    = np.clip(M2,-100,100)
