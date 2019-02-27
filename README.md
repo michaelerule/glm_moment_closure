@@ -7,7 +7,7 @@ This repository contains a demonstration of moment closure applied to autoregres
 
 
 <div>
-  <img src="./ARPPGLM.gif" width="75%" class="img-responsive" alt="Responsive image" style="margin:0 auto; display:block;">
+  <img src="./ARPPGLM.gif" width="75%" class="img-responsive" style="margin:0 auto; display:block;">
 </div>
 
 *Caption: Moment closure methods provide a way to convert between autoregressive and state-space point-process models. The history of the point process is taken as the state space, and moment-closure provides (nonlinear) equations governing the time evolution of the latent distribution over this state-space, approximated as a Gaussian process (red).*
