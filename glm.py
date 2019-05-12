@@ -312,8 +312,6 @@ def make_cosine_basis(N,L,min_interval,normalize=True):
     B = log_cosine_basis(np.arange(N),t,base=b,offset=0,normalize=normalize)
     return B
     
-# Argument cleaning: tolerate some sloppiness in return types
-from neurotools.linalg.arguments import scalar,asvector
 
 def numeric_grad(obj,p,delta=np.finfo('float32').eps**0.1):
     '''
@@ -489,7 +487,34 @@ if __name__=='__MAIN__' or __name__=='__main__':
     print('numeric  Δ² of -loglike at',p,'is\n',numeric_hessian)
 
 
-    
+# Argument cleaning: tolerate some sloppiness in return types
+
+def asvector(M):
+    if isinstance(M,(int,float)):
+        M = [M]
+    if isinstance(M,(tuple,list)):
+        M = np.array(M)
+    assertfinitereal(M)
+    if np.sum(M.shape!=1)>1:
+        raise ValueError('More than one dimension longer than 1, cannot cast to 1-D vector')
+    M = np.squeeze(M)
+    assert(np.size(M) == M.shape[0])
+    return M
+
+def scalar(M):
+    if isinstance(M,(tuple,list)):
+        M = np.array(M)
+    if isinstance(M,np.ndarray):
+        if not np.size(M)==1:
+            raise ValueError('Argument should be a scalar')
+        return M.ravel()[0]
+    if isinstance(M,(int,float)):
+        return M
+    try:
+        return float(M)
+    except:
+        pass
+    raise ValueError('Argument %s of type %s is not a scalar'%(M,type(M)))
     
     
     

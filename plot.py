@@ -17,7 +17,6 @@ import scipy
 import numpy
 from   matplotlib.pyplot import *
 import matplotlib.pyplot as plt
-from   matplotlib.pylab  import find
 
 try: # python 2.x
     from itertools import izip, chain
@@ -665,5 +664,5 @@ def addspikes(Y,lw=0.2,color='k'):
     '''
     Add vertical lines where Y>0
     '''
-    for t in find(Y>0): 
+    for t in np.where(Y>0)[0]: 
         axvline(t,lw=lw,color=color)
