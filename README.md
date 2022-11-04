@@ -14,6 +14,7 @@ This repository contains a demonstration of moment closure applied to autoregres
  - `functions.py`: Defines commonly used small functions
  - `arguments.py`: routines for argument checking and verification
 
+### Example figures
 
 <div style="text-align: center;">
   <img src="./figures/20180808_example_stimulus.png" width="75%" class="img-responsive" style="margin:0 auto; display:block;">
