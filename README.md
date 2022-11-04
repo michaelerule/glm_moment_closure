@@ -33,11 +33,11 @@ This repository contains a demonstration of moment closure applied to autoregres
 
 ### Regarding `obsolete theano experiments`: 
 
-I've explored using the resulting moment equations for inference directly; At the time I needed to use the now-obsolete theano to improve performance. It is unlikely that any of this code will run, but here are the major unbpublished insights: 
+I've explored using the resulting moment equations for inference directly; At the time I needed to use the now-obsolete theano to improve performance. It is unlikely that any of this code will run, but here are the major unpublished insights: 
 
  - The moment-closure reduction of the autoregressive model has a relatively large state space, but (for a single cell), one-dimensional observations. It's best to perform the Poisson observation update on this one-dimensional Gaussian marginal, using your favorite approach. I suggest directly integrating to get the posterior moments, since it is only 1D, although variational methods work well too. The update can then be propagated to the rest of the state space using expectation propagation. This is quite fast. 
 
  - Because the moment-closure reduction is a coarse-graining operation, it's not meaningful to regress the resulting parameters against data directly by e.g. optimizing the variational evidence lower bound or similar. When I attempted this, the model tended to drastically attenuate the variance associated with spiking.
 
- - In summary, moment-closure on autoregressive models is a nice way to convert an estimated point-process model into a simpler, coarse-grained model which behaves like a mean-field model in the mean, but also captures information about bursting, etc, in its covariance terms. This simplified model is continuous and differentiable, and may be more amenable to manthematical analyses. It can also be used to obtan a second-order neural-field reduction of a population. 
+ - In summary, moment-closure on autoregressive models is a nice way to convert an estimated point-process model into a simpler, coarse-grained model which behaves like a mean-field model in the mean, but also captures information about bursting, etc, in its covariance terms. This simplified model is continuous and differentiable, and may be more amenable to mathematical analyses. It can also be used to obtain a second-order neural-field reduction of a population. 
 
