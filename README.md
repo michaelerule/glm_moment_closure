@@ -1,4 +1,4 @@
-# Autoregressive Point Processes as Latent State-Space Models: A Moment-Closure Approach to Fluctuations and Autocorrelations
+# Autoregressive Point Processes as Latent State-Space Models: *A Moment-Closure Approach to Fluctuations and Autocorrelations*
 
 Rule, M., & Sanguinetti, G. (2018). Autoregressive point processes as latent State-Space models: A Moment-Closure approach to fluctuations and autocorrelations. Neural computation, 30(10), 2757-2780. [doi: https://doi.org/10.1162/neco_a_01121.](https://doi.org/10.1162/neco_a_01121)
 
